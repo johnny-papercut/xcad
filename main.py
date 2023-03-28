@@ -1,7 +1,8 @@
 import datetime
+import logging
 import os
-import pickle
 
+import google.cloud.logging
 import googleapiclient.discovery
 import pytz
 import requests
@@ -10,69 +11,122 @@ from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.errors import ResumableUploadError
 from googleapiclient.http import MediaFileUpload, HttpError
-import google.cloud.logging
-import logging
+from google.oauth2.credentials import Credentials
+from google.cloud import bigquery
+from google.oauth2 import service_account
 
+SETTINGS = {
+    
+    # Runtime
+    'debug': True,
+    'headers': {'accept': '*/*', 'x-authorization': os.environ.get('XBL_API_KEY')},
+    'client': None,
+    
+    # Xbox
+    'xbox_api_base': 'https://xbl.io/api/v2',
+    
+    # YouTube
+    'username': os.environ.get('USERNAME'),
+    'playlist': os.environ.get('PLAYLIST_ID'),
+    'client_id': os.environ.get('YT_CLIENT_ID'),
+    'client_secret': os.environ.get('YT_CLIENT_SECRET'),
+    'token_table': os.environ.get('YT_TOKEN_TABLE'),
+}
 
-HEADERS = {'accept': '*/*', 'x-authorization': os.environ.get('XBL_API_KEY')}
-API_BASE_URL = 'https://xbl.io/api/v2'
-USERNAME = os.environ.get('USERNAME')
-PLAYLIST_ID = os.environ.get('PLAYLIST_ID')
-
-DEBUG = True
 api = Flask(__name__)
 
 
 def is_local() -> bool:
     """ Check if this is running locally or not """
-    return os.path.exists('credentials.json')
+    return os.path.exists('bigquery.json')
+
+
+def initialize_bigquery_client():
+    """ Initialize BQ client with local or implied credentials """
+
+    if not os.path.exists('bigquery.json'):
+        return bigquery.Client()
+
+    credentials = service_account.Credentials.from_service_account_file(
+        'bigquery.json', scopes=["https://www.googleapis.com/auth/cloud-platform"])
+
+    return bigquery.Client(credentials=credentials)
+
+
+def set_tokens(token: str, refresh: str):
+    """ Set the YouTube tokens in BigQuery """
+
+    bq = initialize_bigquery_client()
+    bq.query(f"UPDATE `{SETTINGS.get('token_table')}` SET token = '{token}', refresh = '{refresh}' "
+             "WHERE token IS NOT NULL")
+    bq.close()
+
+
+def get_tokens() -> tuple:
+    """ Retrieve the YouTube tokens from BigQuery """
+
+    bq = initialize_bigquery_client()
+    job_result = bq.query(f"SELECT token, refresh FROM `{SETTINGS.get('token_table')}`").result()
+    result = [result for result in job_result][0]
+    bq.close()
+
+    return result.token, result.refresh
+
+
+def auth_youtube_manual():
+    """ Manually authenticate to YouTube """
+
+    credentials = InstalledAppFlow.from_client_config(
+        client_config={
+            "installed": {
+                "client_id": SETTINGS.get('client_id'),
+                "client_secret": SETTINGS.get('client_secret'),
+                "redirect_uris": ["http://localhost", "urn:ietf:wg:oauth:2.0:oob"],
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://accounts.google.com/o/oauth2/token"
+            }
+        },
+        scopes=['https://www.googleapis.com/auth/youtube']
+    ).run_local_server(port=0)
+
+    set_tokens(credentials.token, credentials.refresh_token)
+
+    return credentials
 
 
 def auth_youtube():     # -> googleapiclient.discovery.Resource
     """ Authenticate to YouTube and return a YouTube API client connection """
 
-    if DEBUG:
+    if SETTINGS.get('debug'):
         logging.info("Authenticating to YouTube...")
 
-    credentials = None
+    token, refresh = get_tokens()
 
-    if is_local:
+    credentials = Credentials(
+        client_id=SETTINGS.get('client_id'),
+        client_secret=SETTINGS.get('client_secret'),
+        token=token,
+        refresh_token=refresh,
+        token_uri='https://accounts.google.com/o/oauth2/token',
+        scopes=['https://www.googleapis.com/auth/youtube']
+    )
 
-        if os.path.exists('youtube.pickle'):
-            with open('youtube.pickle', 'rb') as token:
-                credentials = pickle.load(token)
+    credentials.refresh(Request())
 
-        if not credentials or not credentials.valid:
-            if credentials and credentials.expired and credentials.refresh_token:
-                credentials.refresh(Request())
-            else:
-                credentials = InstalledAppFlow.from_client_config(
-                    client_config={
-                        "installed": {
-                            "client_id": os.environ.get('YT_CLIENT_ID'),
-                            "client_secret": os.environ.get('YT_CLIENT_SECRET'),
-                            "redirect_uris": ["http://localhost", "urn:ietf:wg:oauth:2.0:oob"],
-                            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                            "token_uri": "https://accounts.google.com/o/oauth2/token"
-                        }
-                    },
-                    scopes=['https://www.googleapis.com/auth/youtube']
-                ).run_local_server(port=0)
+    if credentials and not credentials.valid:
+        if credentials.expired and credentials.refresh_token:
+            credentials.refresh(Request())
+            set_tokens(credentials.token, credentials.refresh_token)
+        else:
+            return None
 
-            with open('youtube.pickle', 'wb') as token:
-                pickle.dump(credentials, token)
-
-        return googleapiclient.discovery.build('youtube', 'v3', credentials=credentials)
-
-    else:
-
-        return googleapiclient.discovery.build('youtube', 'v3')
+    return googleapiclient.discovery.build('youtube', 'v3', credentials=credentials)
 
 
 def get_last_playlist_items(youtube) -> list:
     """ Get the titles of the last 50 YouTube playlist videos """
 
-    if DEBUG:
+    if SETTINGS.get('debug'):
         logging.info("Getting playlist titles from YouTube...")
 
     titles = []
@@ -83,7 +137,7 @@ def get_last_playlist_items(youtube) -> list:
         try:
             response = youtube.playlistItems().list(
                 part='contentDetails,snippet',
-                playlistId=os.environ.get('PLAYLIST_ID'),
+                playlistId=SETTINGS.get('playlist'),
                 maxResults=50,
                 pageToken=page_token,
             ).execute()
@@ -108,21 +162,27 @@ def get_last_playlist_items(youtube) -> list:
 def get_xbox_capture_list() -> list:
     """ Get data about recent Xbox captures """
 
-    if DEBUG:
+    if SETTINGS.get('debug'):
         logging.info("Getting capture data from Xbox...")
 
     clips = []
 
-    for clip in requests.get(f"{API_BASE_URL}/dvr/gameclips", headers=HEADERS).json().get('values'):
+    for clip in requests.get(
+            f"{SETTINGS.get('xbox_api_base')}/dvr/gameclips",
+            headers=SETTINGS.get('headers')).json().get('values'):
+
         clip_datetime = datetime.datetime.strptime(clip.get('uploadDate').split('.')[0], '%Y-%m-%dT%H:%M:%S')
+
         if clip_datetime < datetime.datetime(2023, 3, 18):
             continue
+
         clip_data = {
             'gamertag': os.environ.get('USERNAMES'),
             'uri': clip.get('contentLocators')[0].get('uri'),
             'game': clip.get('titleName').replace('\u00ae', ''),
             'datetime': clip_datetime.replace(tzinfo=datetime.timezone.utc).astimezone(pytz.timezone('US/Central')),
         }
+
         clip_data['title'] = f"{clip_data.get('game')} - {clip_data.get('datetime').strftime('%m-%d-%Y %H:%M:%S')}"
         clips.append(clip_data)
 
@@ -132,7 +192,7 @@ def get_xbox_capture_list() -> list:
 def download_capture(capture_data: dict) -> tuple:
     """ Download a specific capture """
 
-    if DEBUG:
+    if SETTINGS.get('debug'):
         logging.info(f"Downloading capture: {capture_data.get('title')} ...")
 
     dl = requests.get(capture_data.get('uri'), stream=True)
@@ -183,7 +243,7 @@ def upload_capture_to_youtube(youtube, capture_data) -> tuple:
         part="snippet",
         body={
           "snippet": {
-            "playlistId": PLAYLIST_ID,
+            "playlistId": SETTINGS.get('playlist'),
             "resourceId": {
               "kind": "youtube#video",
               "videoId": video_id
@@ -216,7 +276,7 @@ def process(count: int = -1):
     youtube_api = auth_youtube()
     existing = get_last_playlist_items(youtube_api)
 
-    if DEBUG and not existing:
+    if SETTINGS.get('debug') and not existing:
         logging.warning("Quota exceeded, stopping operation.")
         return
 
@@ -251,7 +311,7 @@ def process(count: int = -1):
 
     logging.info(f"Uploads - Success: {len(results.get('success'))} Failed: {len(results.get('fail'))}")
 
-    if DEBUG and results.get('success'):
+    if SETTINGS.get('debug') and results.get('success'):
         logging.info("The following videos uploaded successfully:")
         for title in results.get('success'):
             logging.info(f"{title}")
