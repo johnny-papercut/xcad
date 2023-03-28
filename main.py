@@ -10,6 +10,9 @@ from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.errors import ResumableUploadError
 from googleapiclient.http import MediaFileUpload, HttpError
+import google.cloud.logging
+import logging
+
 
 HEADERS = {'accept': '*/*', 'x-authorization': os.environ.get('XBL_API_KEY')}
 API_BASE_URL = 'https://xbl.io/api/v2'
@@ -20,46 +23,57 @@ DEBUG = True
 api = Flask(__name__)
 
 
+def is_local() -> bool:
+    """ Check if this is running locally or not """
+    return os.path.exists('credentials.json')
+
+
 def auth_youtube():     # -> googleapiclient.discovery.Resource
     """ Authenticate to YouTube and return a YouTube API client connection """
 
     if DEBUG:
-        print("Authenticating to YouTube...")
+        logging.info("Authenticating to YouTube...")
 
     credentials = None
 
-    if os.path.exists('youtube.pickle'):
-        with open('youtube.pickle', 'rb') as token:
-            credentials = pickle.load(token)
+    if is_local:
 
-    if not credentials or not credentials.valid:
-        if credentials and credentials.expired and credentials.refresh_token:
-            credentials.refresh(Request())
-        else:
-            credentials = InstalledAppFlow.from_client_config(
-                client_config={
-                    "installed": {
-                        "client_id": os.environ.get('YT_CLIENT_ID'),
-                        "client_secret": os.environ.get('YT_CLIENT_SECRET'),
-                        "redirect_uris": ["http://localhost", "urn:ietf:wg:oauth:2.0:oob"],
-                        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                        "token_uri": "https://accounts.google.com/o/oauth2/token"
-                    }
-                },
-                scopes=['https://www.googleapis.com/auth/youtube']
-            ).run_local_server(port=0)
+        if os.path.exists('youtube.pickle'):
+            with open('youtube.pickle', 'rb') as token:
+                credentials = pickle.load(token)
 
-        with open('youtube.pickle', 'wb') as token:
-            pickle.dump(credentials, token)
+        if not credentials or not credentials.valid:
+            if credentials and credentials.expired and credentials.refresh_token:
+                credentials.refresh(Request())
+            else:
+                credentials = InstalledAppFlow.from_client_config(
+                    client_config={
+                        "installed": {
+                            "client_id": os.environ.get('YT_CLIENT_ID'),
+                            "client_secret": os.environ.get('YT_CLIENT_SECRET'),
+                            "redirect_uris": ["http://localhost", "urn:ietf:wg:oauth:2.0:oob"],
+                            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                            "token_uri": "https://accounts.google.com/o/oauth2/token"
+                        }
+                    },
+                    scopes=['https://www.googleapis.com/auth/youtube']
+                ).run_local_server(port=0)
 
-    return googleapiclient.discovery.build('youtube', 'v3', credentials=credentials)
+            with open('youtube.pickle', 'wb') as token:
+                pickle.dump(credentials, token)
+
+        return googleapiclient.discovery.build('youtube', 'v3', credentials=credentials)
+
+    else:
+
+        return googleapiclient.discovery.build('youtube', 'v3')
 
 
 def get_last_playlist_items(youtube) -> list:
     """ Get the titles of the last 50 YouTube playlist videos """
 
     if DEBUG:
-        print("Getting playlist titles from YouTube...")
+        logging.info("Getting playlist titles from YouTube...")
 
     titles = []
     page_token = None
@@ -69,7 +83,7 @@ def get_last_playlist_items(youtube) -> list:
         try:
             response = youtube.playlistItems().list(
                 part='contentDetails,snippet',
-                playlistId='PLYoQGprQsb0Lud8uz0KyDfQzTr91UXVMU',
+                playlistId=os.environ.get('PLAYLIST_ID'),
                 maxResults=50,
                 pageToken=page_token,
             ).execute()
@@ -95,7 +109,7 @@ def get_xbox_capture_list() -> list:
     """ Get data about recent Xbox captures """
 
     if DEBUG:
-        print("Getting capture data from Xbox...")
+        logging.info("Getting capture data from Xbox...")
 
     clips = []
 
@@ -112,14 +126,14 @@ def get_xbox_capture_list() -> list:
         clip_data['title'] = f"{clip_data.get('game')} - {clip_data.get('datetime').strftime('%m-%d-%Y %H:%M:%S')}"
         clips.append(clip_data)
 
-    return clips
+    return sorted(clips, key=lambda x: x.get('datetime'))
 
 
 def download_capture(capture_data: dict) -> tuple:
     """ Download a specific capture """
 
     if DEBUG:
-        print(f"\tDownloading capture: {capture_data.get('title')} ...")
+        logging.info(f"Downloading capture: {capture_data.get('title')} ...")
 
     dl = requests.get(capture_data.get('uri'), stream=True)
 
@@ -137,7 +151,7 @@ def download_capture(capture_data: dict) -> tuple:
 def upload_capture_to_youtube(youtube, capture_data) -> tuple:
     """ Upload a capture to YouTube and add to the given playlist """
 
-    print(f"\tUploading capture: {capture_data.get('title')} ...")
+    logging.info(f"Uploading capture: {capture_data.get('title')} ...")
 
     media = MediaFileUpload(f"{capture_data.get('title').replace(':', '')}.mp4", mimetype='video/mp4', resumable=True)
 
@@ -182,17 +196,28 @@ def upload_capture_to_youtube(youtube, capture_data) -> tuple:
     return True, True
 
 
+@api.route("/process/<int:count>")
+def process_count(count: int):
+    """ Process a specific count of videos """
+    return process(count)
+
+
 @api.route("/process/")
 def process(count: int = -1):
     """ Main function, processes everything """
 
     results = {'success': [], 'fail': []}
 
+    if count != -1:
+        logging.info(f"Running XCAD for {count} video{'s' if count != 1 else ''}...")
+    else:
+        logging.info("Running XCAD for all videos (before exceeding quota)...")
+
     youtube_api = auth_youtube()
     existing = get_last_playlist_items(youtube_api)
 
     if DEBUG and not existing:
-        print("Quota exceeded, stopping operation.")
+        logging.warning("Quota exceeded, stopping operation.")
         return
 
     captures = get_xbox_capture_list()
@@ -207,7 +232,7 @@ def process(count: int = -1):
         if not success:
             results['fail'].append((capture.get('title'), f"error while downloading: {message}"))
             if message == 'quota':
-                print("Quota exceeded, stopping operation.")
+                logging.warning("Quota exceeded, stopping operation.")
                 return results, 403 if results.get('fail') else 200
 
         else:
@@ -221,23 +246,30 @@ def process(count: int = -1):
 
         os.remove(f"{capture.get('title').replace(':', '')}.mp4")
 
-        if -1 < count < (len(results.get('fail')) + len(results.get('success'))):
+        if -1 < count <= (len(results.get('fail')) + len(results.get('success'))):
             break
 
-    print(f"\nUploads - Success: {len(results.get('success'))} Failed: {len(results.get('fail'))}")
+    logging.info(f"Uploads - Success: {len(results.get('success'))} Failed: {len(results.get('fail'))}")
 
     if DEBUG and results.get('success'):
-        print("\nThe following videos uploaded successfully:")
+        logging.info("The following videos uploaded successfully:")
         for title in results.get('success'):
-            print(f"\t{title}")
+            logging.info(f"{title}")
 
     if results.get('fail'):
-        print("\nThe following videos failed to upload:")
+        logging.info("The following videos failed to upload:")
         for title, error in results.get('fail'):
-            print(f"\t{title} - {error}")
+            logging.warning(f"{title} - {error}")
 
     return results, 403 if results.get('fail') else 200
 
 
 if __name__ == '__main__':
+
+    logging.basicConfig(level=logging.INFO)
+
+    if not is_local():
+        client = google.cloud.logging.Client()
+        client.setup_logging()
+
     api.run()
