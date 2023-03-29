@@ -1,8 +1,6 @@
 import datetime
-import logging
 import os
 
-import google.cloud.logging
 import googleapiclient.discovery
 import pytz
 import requests
@@ -16,24 +14,30 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 
 SETTINGS = {
-    
-    # Runtime
     'debug': True,
-    'headers': {'accept': '*/*', 'x-authorization': os.environ.get('XBL_API_KEY')},
-    'client': None,
-    
-    # Xbox
     'xbox_api_base': 'https://xbl.io/api/v2',
-    
-    # YouTube
-    'username': os.environ.get('USERNAME'),
-    'playlist': os.environ.get('PLAYLIST_ID'),
-    'client_id': os.environ.get('YT_CLIENT_ID'),
-    'client_secret': os.environ.get('YT_CLIENT_SECRET'),
-    'token_table': os.environ.get('YT_TOKEN_TABLE'),
+    'profile_table': 'xcad.profiles',
+    'profiles': {},
 }
 
 api = Flask(__name__)
+
+
+def load_profiles():
+    """ Load profile data from BigQuery """
+
+    bq = initialize_bigquery_client()
+    profiles = [profile for profile in bq.query(f"SELECT * FROM `{SETTINGS.get('profile_table')}`").result()]
+
+    for profile in profiles:
+        SETTINGS['profiles'][profile.xbox_gamertag] = {
+            'xbox_api_key': profile.xbox_api_key,
+            'youtube_playlist': profile.youtube_playlist,
+            'youtube_client_id': profile.youtube_client_id,
+            'youtube_client_secret': profile.youtube_client_secret,
+            'youtube_token': profile.youtube_token,
+            'youtube_refresh_token': profile.youtube_refresh_token,
+        }
 
 
 def is_local() -> bool:
@@ -53,34 +57,35 @@ def initialize_bigquery_client():
     return bigquery.Client(credentials=credentials)
 
 
-def set_tokens(token: str, refresh: str):
+def update_tokens(profile: str, token: str, refresh: str):
     """ Set the YouTube tokens in BigQuery """
 
     bq = initialize_bigquery_client()
-    bq.query(f"UPDATE `{SETTINGS.get('token_table')}` SET token = '{token}', refresh = '{refresh}' "
-             "WHERE token IS NOT NULL")
+    bq.query(f"UPDATE `{SETTINGS.get('profiles_table')}` "
+             f"SET youtube_token = '{token}', youtube_refresh_token = '{refresh}' "
+             f"WHERE xbox_gamertag = '{profile}'")
     bq.close()
 
 
-def get_tokens() -> tuple:
-    """ Retrieve the YouTube tokens from BigQuery """
-
-    bq = initialize_bigquery_client()
-    job_result = bq.query(f"SELECT token, refresh FROM `{SETTINGS.get('token_table')}`").result()
-    result = [result for result in job_result][0]
-    bq.close()
-
-    return result.token, result.refresh
-
-
-def auth_youtube_manual():
+def manual_auth_youtube(profile: str, env: bool = False, client_id: str = '', client_secret: str = ''):
     """ Manually authenticate to YouTube """
+
+    load_profiles()
+
+    if env:
+        client_id = os.environ.get('youtube_client_id')
+        client_secret = os.environ.get('youtube_client_secret')
+    else:
+        if client_id == '':
+            client_id = SETTINGS.get('profiles').get(profile).get('youtube_client_id')
+        if client_secret == '':
+            client_secret = SETTINGS.get('profiles').get(profile).get('youtube_client_secret')
 
     credentials = InstalledAppFlow.from_client_config(
         client_config={
             "installed": {
-                "client_id": SETTINGS.get('client_id'),
-                "client_secret": SETTINGS.get('client_secret'),
+                "client_id": client_id,
+                "client_secret": client_secret,
                 "redirect_uris": ["http://localhost", "urn:ietf:wg:oauth:2.0:oob"],
                 "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                 "token_uri": "https://accounts.google.com/o/oauth2/token"
@@ -89,24 +94,24 @@ def auth_youtube_manual():
         scopes=['https://www.googleapis.com/auth/youtube']
     ).run_local_server(port=0)
 
-    set_tokens(credentials.token, credentials.refresh_token)
+    update_tokens(profile, credentials.token, credentials.refresh_token)
 
     return credentials
 
 
-def auth_youtube():     # -> googleapiclient.discovery.Resource
+def auth_youtube(profile: str):     # -> googleapiclient.discovery.Resource
     """ Authenticate to YouTube and return a YouTube API client connection """
 
     if SETTINGS.get('debug'):
-        logging.info("Authenticating to YouTube...")
+        print(f"[Profile: {profile}] Authenticating to YouTube...")
 
-    token, refresh = get_tokens()
+    settings = SETTINGS.get('profiles').get(profile)
 
     credentials = Credentials(
-        client_id=SETTINGS.get('client_id'),
-        client_secret=SETTINGS.get('client_secret'),
-        token=token,
-        refresh_token=refresh,
+        client_id=settings.get('youtube_client_id'),
+        client_secret=settings.get('youtube_client_secret'),
+        token=settings.get('youtube_token'),
+        refresh_token=settings.get('youtube_refresh_token'),
         token_uri='https://accounts.google.com/o/oauth2/token',
         scopes=['https://www.googleapis.com/auth/youtube']
     )
@@ -116,19 +121,22 @@ def auth_youtube():     # -> googleapiclient.discovery.Resource
     if credentials and not credentials.valid:
         if credentials.expired and credentials.refresh_token:
             credentials.refresh(Request())
-            set_tokens(credentials.token, credentials.refresh_token)
+            update_tokens(profile, credentials.token, credentials.refresh_token)
         else:
             return None
 
     return googleapiclient.discovery.build('youtube', 'v3', credentials=credentials)
 
 
-def get_last_playlist_items(youtube) -> list:
+def get_last_playlist_items(youtube, profile: str) -> list:
     """ Get the titles of the last 50 YouTube playlist videos """
 
     if SETTINGS.get('debug'):
-        logging.info("Getting playlist titles from YouTube...")
+        print(f"[Profile: {profile}] Getting playlist titles from YouTube...")
 
+    settings = SETTINGS.get('profiles').get(profile)
+
+    print(settings)
     titles = []
     page_token = None
 
@@ -137,11 +145,12 @@ def get_last_playlist_items(youtube) -> list:
         try:
             response = youtube.playlistItems().list(
                 part='contentDetails,snippet',
-                playlistId=SETTINGS.get('playlist'),
+                playlistId=settings.get('youtube_playlist'),
                 maxResults=50,
                 pageToken=page_token,
             ).execute()
-        except HttpError:
+        except HttpError as e:
+            print(f"list error: {e}")
             return []
 
         if len(response.get('items')) < 1:
@@ -159,17 +168,19 @@ def get_last_playlist_items(youtube) -> list:
     return titles
 
 
-def get_xbox_capture_list() -> list:
+def get_xbox_capture_list(profile: str) -> list:
     """ Get data about recent Xbox captures """
 
     if SETTINGS.get('debug'):
-        logging.info("Getting capture data from Xbox...")
+        print(f"[Profile: {profile}] Getting capture data from Xbox...")
+
+    settings = SETTINGS.get('profiles').get(profile)
 
     clips = []
 
     for clip in requests.get(
             f"{SETTINGS.get('xbox_api_base')}/dvr/gameclips",
-            headers=SETTINGS.get('headers')).json().get('values'):
+            headers={'accept': '*/*', 'x-authorization': settings.get('xbox_api_key')},).json().get('values'):
 
         clip_datetime = datetime.datetime.strptime(clip.get('uploadDate').split('.')[0], '%Y-%m-%dT%H:%M:%S')
 
@@ -177,7 +188,7 @@ def get_xbox_capture_list() -> list:
             continue
 
         clip_data = {
-            'gamertag': os.environ.get('USERNAME'),
+            'gamertag': profile,
             'uri': clip.get('contentLocators')[0].get('uri'),
             'game': clip.get('titleName').replace('\u00ae', ''),
             'datetime': clip_datetime.replace(tzinfo=datetime.timezone.utc).astimezone(pytz.timezone('US/Central')),
@@ -189,11 +200,11 @@ def get_xbox_capture_list() -> list:
     return sorted(clips, key=lambda x: x.get('datetime'))
 
 
-def download_capture(capture_data: dict) -> tuple:
+def download_capture(capture_data: dict, profile: str) -> tuple:
     """ Download a specific capture """
 
     if SETTINGS.get('debug'):
-        logging.info(f"Downloading capture: {capture_data.get('title')} ...")
+        print(f"[Profile: {profile}] Downloading capture: {capture_data.get('title')} ...")
 
     dl = requests.get(capture_data.get('uri'), stream=True)
 
@@ -208,10 +219,10 @@ def download_capture(capture_data: dict) -> tuple:
     return True, True
 
 
-def upload_capture_to_youtube(youtube, capture_data) -> tuple:
+def upload_capture_to_youtube(youtube, capture_data, profile) -> tuple:
     """ Upload a capture to YouTube and add to the given playlist """
 
-    logging.info(f"Uploading capture: {capture_data.get('title')} ...")
+    print(f"[Profile: {profile}] Uploading capture: {capture_data.get('title')} ...")
 
     media = MediaFileUpload(f"{capture_data.get('title').replace(':', '')}.mp4", mimetype='video/mp4', resumable=True)
 
@@ -243,7 +254,7 @@ def upload_capture_to_youtube(youtube, capture_data) -> tuple:
         part="snippet",
         body={
           "snippet": {
-            "playlistId": SETTINGS.get('playlist'),
+            "playlistId": SETTINGS.get('profiles').get(profile).get('youtube_playlist'),
             "resourceId": {
               "kind": "youtube#video",
               "videoId": video_id
@@ -256,70 +267,74 @@ def upload_capture_to_youtube(youtube, capture_data) -> tuple:
     return True, True
 
 
-@api.route("/process/<int:count>")
-def process_count(count: int):
+@api.route("/process/<string:profile>/<int:count>")
+def process_count(profile: str, count: int):
     """ Process a specific count of videos """
-    return process(count)
+    return process(profile, count)
 
 
 @api.route("/process/")
-def process(count: int = -1):
+def process(profile: str = '', count: int = -1):
     """ Main function, processes everything """
 
     results = {'success': [], 'fail': []}
 
-    if count != -1:
-        logging.info(f"Running XCAD for {count} video{'s' if count != 1 else ''}...")
+    if profile == 'all' or profile == '':
+        profiles = SETTINGS.get('profiles').keys()
     else:
-        logging.info("Running XCAD for all videos (before exceeding quota)...")
+        profiles = [profile]
 
-    youtube_api = auth_youtube()
-    existing = get_last_playlist_items(youtube_api)
+    print(f"Running XCAD with following parameters - "
+          f"{'' if count < 1 else f'Count: {count} | '}Profiles: {', '.join(profiles)}")
 
-    if SETTINGS.get('debug') and not existing:
-        logging.warning("Quota exceeded, stopping operation.")
-        return
+    for profile in profiles:
+        youtube_api = auth_youtube(profile)
+        existing = get_last_playlist_items(youtube_api, profile)
 
-    captures = get_xbox_capture_list()
+        if SETTINGS.get('debug') and not existing:
+            print("Quota exceeded, stopping operation.")
+            return
 
-    for capture in captures:
+        captures = get_xbox_capture_list(profile)
 
-        if capture.get('title') in existing:
-            continue
+        for capture in captures:
 
-        success, message = download_capture(capture)
+            if capture.get('title') in existing:
+                continue
 
-        if not success:
-            results['fail'].append((capture.get('title'), f"error while downloading: {message}"))
-            if message == 'quota':
-                logging.warning("Quota exceeded, stopping operation.")
-                return results, 403 if results.get('fail') else 200
-
-        else:
-            success, message = upload_capture_to_youtube(youtube_api, capture)
+            success, message = download_capture(capture, profile)
 
             if not success:
-                results['fail'].append((capture.get('title'), f"error while uploading: {message}"))
+                results['fail'].append((profile, capture.get('title'), f"error while downloading: {message}"))
+                if message == 'quota':
+                    print("Quota exceeded, stopping operation.")
+                    return results, 403 if results.get('fail') else 200
 
             else:
-                results['success'].append(capture.get('title'))
+                success, message = upload_capture_to_youtube(youtube_api, capture, profile)
 
-        os.remove(f"{capture.get('title').replace(':', '')}.mp4")
+                if not success:
+                    results['fail'].append((profile, capture.get('title'), f"error while uploading: {message}"))
 
-        if -1 < count <= (len(results.get('fail')) + len(results.get('success'))):
-            break
+                else:
+                    results['success'].append((profile, capture.get('title')))
 
-    logging.info(f"Uploads - Success: {len(results.get('success'))} Failed: {len(results.get('fail'))}")
+            os.remove(f"{capture.get('title').replace(':', '')}.mp4")
+
+            if -1 < count <= (len(results.get('fail')) + len(results.get('success'))):
+                break
+
+    print(f"Uploads - Success: {len(results.get('success'))} Failed: {len(results.get('fail'))}")
 
     if SETTINGS.get('debug') and results.get('success'):
-        logging.info("The following videos uploaded successfully:")
-        for title in results.get('success'):
-            logging.info(f"{title}")
+        print("The following videos uploaded successfully:")
+        for profile, title in results.get('success'):
+            print(f"[{profile}] {title}")
 
     if results.get('fail'):
-        logging.info("The following videos failed to upload:")
-        for title, error in results.get('fail'):
-            logging.warning(f"{title} - {error}")
+        print("The following videos failed to upload:")
+        for profile, title, error in results.get('fail'):
+            print(f"[{profile}] {title} - {error}")
 
     return results, 403 if results.get('fail') else 200
 
@@ -333,10 +348,5 @@ def index():
 
 if __name__ == '__main__':
 
-    logging.basicConfig(level=logging.INFO)
-
-    if not is_local():
-        client = google.cloud.logging.Client()
-        client.setup_logging()
-
+    load_profiles()
     api.run()
