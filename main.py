@@ -177,7 +177,7 @@ def get_xbox_capture_list() -> list:
             continue
 
         clip_data = {
-            'gamertag': os.environ.get('USERNAMES'),
+            'gamertag': os.environ.get('USERNAME'),
             'uri': clip.get('contentLocators')[0].get('uri'),
             'game': clip.get('titleName').replace('\u00ae', ''),
             'datetime': clip_datetime.replace(tzinfo=datetime.timezone.utc).astimezone(pytz.timezone('US/Central')),
@@ -322,6 +322,13 @@ def process(count: int = -1):
             logging.warning(f"{title} - {error}")
 
     return results, 403 if results.get('fail') else 200
+
+
+@api.route("/")
+def index():
+    """ Index page """
+
+    return "xcad", 200
 
 
 if __name__ == '__main__':
