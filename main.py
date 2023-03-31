@@ -27,6 +27,7 @@ def load_profiles():
     """ Load profile data from BigQuery """
 
     bq = initialize_bigquery_client()
+    print(bq.query(f"SELECT * FROM `{SETTINGS.get('profile_table')}`").result())
     profiles = [profile for profile in bq.query(f"SELECT * FROM `{SETTINGS.get('profile_table')}`").result()]
 
     for profile in profiles:
