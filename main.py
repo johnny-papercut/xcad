@@ -16,7 +16,7 @@ from google.oauth2 import service_account
 SETTINGS = {
     'debug': True,
     'xbox_api_base': 'https://xbl.io/api/v2',
-    'profile_table': 'xcad.profiles',
+    'profile_table': 'zirekyle-main.xcad.profiles',
     'profiles': {},
 }
 
