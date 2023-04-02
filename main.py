@@ -277,6 +277,8 @@ def process_count(profile: str, count: int):
 @api.route("/process/")
 def process(profile: str = '', count: int = -1):
     """ Main function, processes everything """
+    
+    load_profiles()
 
     results = {'success': [], 'fail': []}
 
@@ -349,5 +351,4 @@ def index():
 
 if __name__ == '__main__':
 
-    load_profiles()
     api.run()
