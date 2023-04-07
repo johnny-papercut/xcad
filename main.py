@@ -63,7 +63,7 @@ def update_tokens(profile: str, token: str, refresh: str):
     """ Set the YouTube tokens in BigQuery """
 
     bq = initialize_bigquery_client()
-    bq.query(f"UPDATE `{SETTINGS.get('profiles_table')}` "
+    bq.query(f"UPDATE `{SETTINGS.get('profile_table')}` "
              f"SET youtube_token = '{token}', youtube_refresh_token = '{refresh}' "
              f"WHERE xbox_gamertag = '{profile}'")
     bq.close()
@@ -100,6 +100,7 @@ def manual_auth_youtube(profile: str, env: bool = False, client_id: str = '', cl
     ).run_local_server(port=0)
 
     update_tokens(profile, credentials.token, credentials.refresh_token)
+    load_profiles()
 
     return credentials
 
@@ -296,12 +297,17 @@ def process(profile: str = '', count: int = -1):
           f"{'' if count < 1 else f'Count: {count} | '}Profiles: {', '.join(profiles)}")
 
     for profile in profiles:
+
         youtube_api = auth_youtube(profile)
+
+        if not youtube_api:
+            return "YouTube authentication failure", 401
+
         existing = get_last_playlist_items(youtube_api, profile)
 
         if SETTINGS.get('debug') and not existing:
             print("Quota exceeded, stopping operation.")
-            return
+            return "Quota exceeded, stopping operation.", 200
 
         captures = get_xbox_capture_list(profile)
 
