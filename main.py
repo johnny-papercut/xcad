@@ -1,17 +1,19 @@
 import datetime
 import os
+import sys
 
 import googleapiclient.discovery
 import pytz
 import requests
 from flask import Flask
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
+from google.cloud import bigquery
+from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.errors import ResumableUploadError
 from googleapiclient.http import MediaFileUpload, HttpError
-from google.oauth2.credentials import Credentials
-from google.cloud import bigquery
-from google.oauth2 import service_account
 
 SETTINGS = {
     'debug': True,
@@ -66,6 +68,9 @@ def update_tokens(profile: str, token: str, refresh: str):
              f"WHERE xbox_gamertag = '{profile}'")
     bq.close()
 
+    SETTINGS['youtube_token'] = token
+    SETTINGS['youtube_refresh_token'] = refresh
+
 
 def manual_auth_youtube(profile: str, env: bool = False, client_id: str = '', client_secret: str = ''):
     """ Manually authenticate to YouTube """
@@ -105,6 +110,7 @@ def auth_youtube(profile: str):     # -> googleapiclient.discovery.Resource
     if SETTINGS.get('debug'):
         print(f"[Profile: {profile}] Authenticating to YouTube...")
 
+    load_profiles()
     settings = SETTINGS.get('profiles').get(profile)
 
     credentials = Credentials(
@@ -116,14 +122,15 @@ def auth_youtube(profile: str):     # -> googleapiclient.discovery.Resource
         scopes=['https://www.googleapis.com/auth/youtube']
     )
 
-    credentials.refresh(Request())
+    try:
+        credentials.refresh(Request())
+    except RefreshError:
+        return None
 
-    if credentials and not credentials.valid:
-        if credentials.expired and credentials.refresh_token:
-            credentials.refresh(Request())
-            update_tokens(profile, credentials.token, credentials.refresh_token)
-        else:
-            return None
+    update_tokens(profile, credentials.token, credentials.refresh_token)
+
+    if not credentials.valid:
+        return None
 
     return googleapiclient.discovery.build('youtube', 'v3', credentials=credentials)
 
@@ -349,4 +356,11 @@ def index():
 
 if __name__ == '__main__':
 
-    api.run()
+    if len(sys.argv) > 1 and sys.argv[1] == 'auth':
+        if len(sys.argv) < 3:
+            print("usage: main.py auth [profile_name]")
+        else:
+            manual_auth_youtube(sys.argv[2])
+
+    else:
+        api.run()
