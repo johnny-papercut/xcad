@@ -6,12 +6,8 @@ import googleapiclient.discovery
 import pytz
 import requests
 from flask import Flask
-from google.auth.exceptions import RefreshError
-from google.auth.transport.requests import Request
 from google.cloud import bigquery
 from google.oauth2 import service_account
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.errors import ResumableUploadError
 from googleapiclient.http import MediaFileUpload, HttpError
 
@@ -34,11 +30,8 @@ def load_profiles():
     for profile in profiles:
         SETTINGS['profiles'][profile.xbox_gamertag] = {
             'xbox_api_key': profile.xbox_api_key,
-            'youtube_playlist': profile.youtube_playlist,
-            'youtube_client_id': profile.youtube_client_id,
-            'youtube_client_secret': profile.youtube_client_secret,
-            'youtube_token': profile.youtube_token,
-            'youtube_refresh_token': profile.youtube_refresh_token,
+            'youtube_channel_id': profile.youtube_channel_id,
+            'youtube_playlist': profile.youtube_playlist_id,
         }
 
 
@@ -50,88 +43,23 @@ def is_local() -> bool:
 def initialize_bigquery_client():
     """ Initialize BQ client with local or implied credentials """
 
-    if not os.path.exists('bigquery.json'):
+    if not os.path.exists('credentials.json'):
         return bigquery.Client()
 
     credentials = service_account.Credentials.from_service_account_file(
-        'bigquery.json', scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        'credentials.json', scopes=["https://www.googleapis.com/auth/cloud-platform"])
 
     return bigquery.Client(credentials=credentials)
 
 
-def update_tokens(profile: str, token: str, refresh: str):
-    """ Set the YouTube tokens in BigQuery """
+def initialize_youtube_client():
+    """ Initialize BQ client with local or implied credentials """
 
-    bq = initialize_bigquery_client()
-    bq.query(f"UPDATE `{SETTINGS.get('profile_table')}` "
-             f"SET youtube_token = '{token}', youtube_refresh_token = '{refresh}' "
-             f"WHERE xbox_gamertag = '{profile}'")
-    bq.close()
+    if not os.path.exists('credentials.json'):
+        return googleapiclient.discovery.build('youtube', 'v3')
 
-    SETTINGS['youtube_token'] = token
-    SETTINGS['youtube_refresh_token'] = refresh
-
-
-def manual_auth_youtube(profile: str, env: bool = False, client_id: str = '', client_secret: str = ''):
-    """ Manually authenticate to YouTube """
-
-    load_profiles()
-
-    if env:
-        client_id = os.environ.get('youtube_client_id')
-        client_secret = os.environ.get('youtube_client_secret')
-    else:
-        if client_id == '':
-            client_id = SETTINGS.get('profiles').get(profile).get('youtube_client_id')
-        if client_secret == '':
-            client_secret = SETTINGS.get('profiles').get(profile).get('youtube_client_secret')
-
-    credentials = InstalledAppFlow.from_client_config(
-        client_config={
-            "installed": {
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "redirect_uris": ["http://localhost", "urn:ietf:wg:oauth:2.0:oob"],
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://accounts.google.com/o/oauth2/token"
-            }
-        },
-        scopes=['https://www.googleapis.com/auth/youtube']
-    ).run_local_server(port=0)
-
-    update_tokens(profile, credentials.token, credentials.refresh_token)
-    load_profiles()
-
-    return credentials
-
-
-def auth_youtube(profile: str):     # -> googleapiclient.discovery.Resource
-    """ Authenticate to YouTube and return a YouTube API client connection """
-
-    if SETTINGS.get('debug'):
-        print(f"[Profile: {profile}] Authenticating to YouTube...")
-
-    load_profiles()
-    settings = SETTINGS.get('profiles').get(profile)
-
-    credentials = Credentials(
-        client_id=settings.get('youtube_client_id'),
-        client_secret=settings.get('youtube_client_secret'),
-        token=settings.get('youtube_token'),
-        refresh_token=settings.get('youtube_refresh_token'),
-        token_uri='https://accounts.google.com/o/oauth2/token',
-        scopes=['https://www.googleapis.com/auth/youtube']
-    )
-
-    try:
-        credentials.refresh(Request())
-    except RefreshError:
-        return None
-
-    update_tokens(profile, credentials.token, credentials.refresh_token)
-
-    if not credentials.valid:
-        return None
+    credentials = service_account.Credentials.from_service_account_file(
+        'credentials.json', scopes=["https://www.googleapis.com/auth/youtube"])
 
     return googleapiclient.discovery.build('youtube', 'v3', credentials=credentials)
 
@@ -238,7 +166,8 @@ def upload_capture_to_youtube(youtube, capture_data, profile) -> tuple:
         body={
           "snippet": {
             "description": "This video was automatically uploaded from XCAD.",
-            "title": capture_data.get('title')
+            "title": capture_data.get('title'),
+            "channelId": profile.get('youtube_channel_id'),
           },
           "status": {
             "privacyStatus": "unlisted"
@@ -298,7 +227,7 @@ def process(profile: str = '', count: int = -1):
 
     for profile in profiles:
 
-        youtube_api = auth_youtube(profile)
+        youtube_api = initialize_youtube_client()
 
         if not youtube_api:
             return "YouTube authentication failure", 401
@@ -362,11 +291,8 @@ def index():
 
 if __name__ == '__main__':
 
-    if len(sys.argv) > 1 and sys.argv[1] == 'auth':
-        if len(sys.argv) < 3:
-            print("usage: main.py auth [profile_name]")
-        else:
-            manual_auth_youtube(sys.argv[2])
+    if len(sys.argv) > 1 and sys.argv[1] == 'process':
+        process()
 
     else:
         api.run()
