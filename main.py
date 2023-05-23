@@ -9,7 +9,7 @@ import google_auth_oauthlib.flow
 import googleapiclient.discovery
 import pytz
 import requests
-from flask import Flask
+
 from google.cloud import bigquery
 from google.cloud import storage
 from google.oauth2 import service_account
@@ -24,7 +24,7 @@ SETTINGS = {
     'profiles': {},
 }
 
-api = Flask(__name__)
+api = flask.Flask(__name__)
 api.secret_key = ''.join(random.choices(string.ascii_uppercase + string.digits, k=20))
 os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 
@@ -156,7 +156,7 @@ def get_last_playlist_items(youtube, profile: str) -> list:
                 maxResults=50,
                 pageToken=page_token,
             ).execute()
-        except HttpError as e:
+        except HttpError:
             return []
 
         if len(response.get('items')) < 1:
@@ -174,7 +174,7 @@ def get_last_playlist_items(youtube, profile: str) -> list:
     return titles
 
 
-def get_screenshot_bucket_items(storage_client, profile: str) -> list:
+def get_screenshot_bucket_list(storage_client, profile: str) -> list:
 
     if SETTINGS.get('debug'):
         print(f"[Profile: {profile}] Getting existing screenshot list...")
@@ -191,6 +191,32 @@ def get_screenshot_bucket_items(storage_client, profile: str) -> list:
             titles.append(formatted)
 
     return titles
+
+
+def get_screenshots(profile: str, kind: str = 'all') -> list:
+
+    load_profiles()
+
+    storage_client = initialize_storage_client()
+    settings = SETTINGS.get('profiles').get(profile)
+
+    screenshots = []
+
+    for blob in storage_client.list_blobs(settings.get('screenshot_bucket_name')):
+
+        blob_data = {
+            'title': ' - '.join(blob.name.split(' - ')[0:-1]).replace('.png', ''),
+            'filename': blob.name,
+            'url': f"https://storage.googleapis.com/{settings.get('screenshot_bucket_name')}/{blob.name}",
+            'game': ' - '.join(blob.name.split(' - ')[0:-2]),
+            'datetime': datetime.datetime.strptime(blob.name.split(' - ')[-2], '%m-%d-%Y %H-%M-%S'),
+            'kind': blob.name.split(' - ')[-1].replace('.png', '')
+        }
+
+        if kind == 'all' or blob_data.get('kind') == kind:
+            screenshots.append(blob_data)
+
+    return screenshots
 
 
 def get_xbox_capture_list(profile: str) -> list:
@@ -427,7 +453,7 @@ def process(profile: str = '', mode: str = '', count: int = -1):
 
         if mode in ['all', 'screens', 'screenshots']:
             storage_api = initialize_storage_client()
-            existing = get_screenshot_bucket_items(storage_api, profile)
+            existing = get_screenshot_bucket_list(storage_api, profile)
             screenshots = get_xbox_screenshot_list(profile)
 
         else:
@@ -534,11 +560,32 @@ def process(profile: str = '', mode: str = '', count: int = -1):
     return results, 403 if results.get('fail') else 200
 
 
+@api.route("/zoom/<string:title>")
+def zoom(title: str):
+    """ Zoom to a single image """
+
+    settings = SETTINGS.get('profiles').get('Zirekyle')
+    url = f"https://storage.googleapis.com/{settings.get('screenshot_bucket_name')}/{title} - Full.png"
+
+    return flask.render_template('zoom.html', title=title, url=url)
+
+
 @api.route("/")
 def index():
     """ Index page """
 
-    return "xcad", 200
+    page = flask.request.args.get('page') if 'page' in flask.request.args.keys() else 1
+    sort = flask.request.args.get('sort') if 'sort' in flask.request.args.keys() else 'new'
+
+    screenshots = sorted(
+        get_screenshots('Zirekyle', 'Thumbnail Small'),
+        key=lambda x: x.get('datetime'),
+        reverse=sort == 'new'
+    )[(int(page)-1)*50:int(page)*50]
+
+    # for file in files:
+
+    return flask.render_template('index.html', screenshots=screenshots)
 
 
 if __name__ == '__main__':

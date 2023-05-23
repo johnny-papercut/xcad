@@ -1,0 +1,41 @@
+@media only screen and (max-device-width : 1024px) {
+    div.grid {
+        grid-template-columns: repeat(1, 1fr);
+    }
+}
+
+@media only screen and (min-width : 1025px) {
+    div.grid {
+        grid-template-columns: repeat(5, 1fr);
+    }
+}
+
+div.grid {
+    width: 90%;
+    margin: 50px auto;
+    display: grid;
+    grid-auto-flow: row;
+    row-gap: 50px;
+    column-gap: 20px;
+}
+
+div.screenshot-data {
+    margin: auto;
+    text-align: center;
+}
+
+img.thumbnail {
+    width: 200px;
+    height: auto;
+}
+
+div.showcase {
+    width: 95%;
+    margin: 50px auto;
+    text-align: center;
+}
+
+div.showcase img {
+    width: 80%;
+    height: auto;
+}

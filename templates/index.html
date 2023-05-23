@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" name="viewport" content="width=device-width,height=device-height,initial-scale=1.0">
+    <title>XCAD</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/base.css') }}">
+</head>
+<body>
+    <div class="grid">
+        {% for screenshot in screenshots %}
+        <div class="screenshot">
+            <div class="screenshot-data thumbnail">
+                <a href="../zoom/{{ screenshot.title }}">
+                    <img src="{{ screenshot.url }}" alt="{{ screenshot.game }}" class="thumbnail"><br>
+                </a>
+            </div>
+            <div class="screenshot-data game-name">
+                {{ screenshot.game }}
+            </div>
+            <div class="screenshot-data date">
+                {{ screenshot.datetime.strftime('%B %d, %Y') }}
+            </div>
+        </div>
+
+        {% endfor %}
+    </div>
+</body>
+</html>
