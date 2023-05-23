@@ -1,20 +1,21 @@
 import datetime
 import os
+import random
+import string
 import sys
 
 import flask
+import google_auth_oauthlib.flow
 import googleapiclient.discovery
 import pytz
 import requests
 from flask import Flask
 from google.cloud import bigquery
+from google.cloud import storage
 from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
 from googleapiclient.errors import ResumableUploadError
 from googleapiclient.http import MediaFileUpload, HttpError
-from google.oauth2.credentials import Credentials
-import google_auth_oauthlib.flow
-import random
-import string
 
 SETTINGS = {
     'debug': True,
@@ -42,6 +43,7 @@ def load_profiles():
             'youtube_client_secret': profile.youtube_client_secret,
             'youtube_token': profile.youtube_token,
             'youtube_refresh_token': profile.youtube_refresh_token,
+            'screenshot_bucket_name': profile.screenshot_bucket_name,
         }
 
 
@@ -54,11 +56,6 @@ def save_credentials(profile: str, credentials: dict):
              f"youtube_refresh_token = '{credentials.get('refresh_token')}' "
              f"WHERE xbox_gamertag = '{profile}'")
     bq.close()
-
-
-def is_local() -> bool:
-    """ Check if this is running locally or not """
-    return os.path.exists('bigquery.json')
 
 
 @api.route('/authorize/<string:profile>')
@@ -95,13 +92,24 @@ def oauth2callback(profile: str):
 def initialize_bigquery_client():
     """ Initialize BQ client with local or implied credentials """
 
-    if not os.path.exists('bigquery.json'):
+    if not os.path.exists('google.json'):
         return bigquery.Client()
 
     credentials = service_account.Credentials.from_service_account_file(
-        'bigquery.json', scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        'google.json', scopes=["https://www.googleapis.com/auth/cloud-platform"])
 
     return bigquery.Client(credentials=credentials)
+
+
+def initialize_storage_client():
+    """ Initialize Google Storage client with local or implied credentials """
+
+    if not os.path.exists('google.json'):
+        return storage.Client()
+
+    credentials = service_account.Credentials.from_service_account_file('google.json')
+
+    return storage.Client(credentials=credentials)
 
 
 def initialize_youtube_client(profile: str):     # -> googleapiclient.discovery.Resource
@@ -149,7 +157,6 @@ def get_last_playlist_items(youtube, profile: str) -> list:
                 pageToken=page_token,
             ).execute()
         except HttpError as e:
-            print(f"list error: {e}")
             return []
 
         if len(response.get('items')) < 1:
@@ -163,6 +170,25 @@ def get_last_playlist_items(youtube, profile: str) -> list:
                 continue
 
             titles.append(item.get('snippet').get('title'))
+
+    return titles
+
+
+def get_screenshot_bucket_items(storage_client, profile: str) -> list:
+
+    if SETTINGS.get('debug'):
+        print(f"[Profile: {profile}] Getting existing screenshot list...")
+
+    settings = SETTINGS.get('profiles').get(profile)
+
+    titles = []
+
+    raw_list = [blob for blob in storage_client.list_blobs(settings.get('screenshot_bucket_name'))]
+
+    for blob in raw_list:
+        formatted = ' - '.join(blob.name.split(' - ')[0:-1])
+        if formatted not in titles:
+            titles.append(formatted)
 
     return titles
 
@@ -199,6 +225,51 @@ def get_xbox_capture_list(profile: str) -> list:
     return sorted(clips, key=lambda x: x.get('datetime'))
 
 
+def get_xbox_screenshot_list(profile: str) -> list:
+    """ Get data about recent Xbox screenshots """
+
+    if SETTINGS.get('debug'):
+        print(f"[Profile: {profile}] Getting screenshot data from Xbox...")
+
+    settings = SETTINGS.get('profiles').get(profile)
+    headers = {'accept': '*/*', 'x-authorization': settings.get('xbox_api_key')}
+
+    screenshots = []
+    continuation = 'initial'
+
+    while continuation:
+
+        url = f"{SETTINGS.get('xbox_api_base')}/dvr/screenshots"
+
+        if continuation and continuation != 'initial':
+            url += f"?continuationToken={continuation}"
+
+        response = requests.get(url, headers=headers).json()
+
+        continuation = response.get('continuationToken')
+
+        for screenshot in response.get('values'):
+
+            dt = datetime.datetime.strptime(screenshot.get('captureDate').split('.')[0], '%Y-%m-%dT%H:%M:%SZ')
+
+            data = {
+                'gamertag': profile,
+                'Full': screenshot.get('contentLocators')[0].get('uri'),
+                'Thumbnail Small': screenshot.get('contentLocators')[1].get('uri'),
+                'Thumbnail Large': screenshot.get('contentLocators')[2].get('uri'),
+                'game': screenshot.get('titleName').replace('\u00ae', ''),
+                'datetime': dt.replace(tzinfo=datetime.timezone.utc).astimezone(pytz.timezone('US/Central')),
+            }
+
+            if len(screenshot.get('contentLocators')) > 3:
+                data['HDR'] = screenshot.get('contentLocators')[3].get('uri')
+
+            data['title'] = f"{data.get('game')} - {data.get('datetime').strftime('%m-%d-%Y %H-%M-%S')}"
+            screenshots.append(data)
+
+    return sorted(screenshots, key=lambda x: x.get('datetime'))
+
+
 def download_capture(capture_data: dict, profile: str) -> tuple:
     """ Download a specific capture """
 
@@ -216,6 +287,44 @@ def download_capture(capture_data: dict, profile: str) -> tuple:
         return False, e
 
     return True, True
+
+
+def download_screenshots(screenshot_data: dict, profile: str) -> tuple:
+    """ Download a collection of screenshot images """
+
+    if SETTINGS.get('debug'):
+        print(f"[Profile: {profile}] Downloading screenshot collection: {screenshot_data.get('title')} ...")
+
+    for kind in ['Full', 'Thumbnail Small', 'Thumbnail Large', 'HDR']:
+
+        if not screenshot_data.get(kind):
+            continue
+
+        url = screenshot_data.get(kind)
+
+        dl = requests.get(url, stream=True)
+
+        try:
+            with open(f"{screenshot_data.get('title').replace(':', '')} - {kind}.png", "wb") as download:
+                for chunk in dl.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        download.write(chunk)
+        except requests.exceptions.StreamConsumedError as e:
+            return False, e
+
+    return True, True
+
+
+def upload_screenshot(storage_client, filename: str, profile: str):
+    """ Upload an individual screenshot file to Google Storage """
+
+    if SETTINGS.get('debug'):
+        print(f"[Profile: {profile}] Uploading screenshot: {filename} ...")
+
+    bucket = storage_client.get_bucket(SETTINGS.get('profiles').get(profile).get('screenshot_bucket_name'))
+    blob = bucket.blob(filename)
+    blob.upload_from_filename(filename)
+    blob.make_public()
 
 
 def upload_capture_to_youtube(youtube, capture_data, profile) -> tuple:
@@ -241,15 +350,12 @@ def upload_capture_to_youtube(youtube, capture_data, profile) -> tuple:
 
     try:
         response = request.execute()
-        print(f"resp: {response}")
     except (ResumableUploadError, HttpError) as e:
-        print(f"error: {e}")
         if ' you have exceeded your ' in e.reason:
             return False, "quota"
         else:
             return False, e
 
-    print(response)
     video_id = response.get('id')
 
     request = youtube.playlistItems().insert(
@@ -280,14 +386,26 @@ def credentials_to_dict(credentials):
     }
 
 
-@api.route("/process/<string:profile>/<int:count>")
-def process_count(profile: str, count: int):
+@api.route("/process/<string:profile>/<string:mode>/<int:count>")
+def process_all(profile: str, mode: str, count: int):
     """ Process a specific count of videos """
-    return process(profile, count)
+    return process(profile, mode, count)
+
+
+@api.route("/process/<string:profile>/<string:mode>")
+def process_mode(profile: str, mode: str):
+    """ Process a specific count of videos """
+    return process(profile, mode)
+
+
+@api.route("/process/<string:profile>")
+def process_profile(profile: str):
+    """ Process a specific count of videos """
+    return process(profile)
 
 
 @api.route("/process/")
-def process(profile: str = '', count: int = -1):
+def process(profile: str = '', mode: str = '', count: int = -1):
     """ Main function, processes everything """
     
     load_profiles()
@@ -299,23 +417,75 @@ def process(profile: str = '', count: int = -1):
     else:
         profiles = [profile]
 
+    if not mode:
+        mode = 'all'
+
     print(f"Running XCAD with following parameters - "
-          f"{'' if count < 1 else f'Count: {count} | '}Profiles: {', '.join(profiles)}")
+          f"Profiles: {', '.join(profiles)} | Mode: {mode.title()} | Count: {'All' if count < 1 else count}")
 
     for profile in profiles:
 
-        youtube_api = initialize_youtube_client(profile)
+        if mode in ['all', 'screens', 'screenshots']:
+            storage_api = initialize_storage_client()
+            existing = get_screenshot_bucket_items(storage_api, profile)
+            screenshots = get_xbox_screenshot_list(profile)
 
-        if not youtube_api:
-            return "YouTube authentication failure", 401
+        else:
+            storage_api = None
+            existing = []
+            screenshots = []
 
-        existing = get_last_playlist_items(youtube_api, profile)
+        i = 0
 
-        if SETTINGS.get('debug') and not existing:
-            print("Quota exceeded, stopping operation.")
-            return "Quota exceeded, stopping operation.", 200
+        for screenshot in screenshots:
 
-        captures = get_xbox_capture_list(profile)
+            if screenshot.get('title').replace(':', '') in existing:
+                continue
+
+            success, message = download_screenshots(screenshot, profile)
+
+            if not success:
+                results['fail'].append((profile, screenshot.get('title'), f"error while downloading: {message}"))
+
+            else:
+
+                for kind in ['Full', 'Thumbnail Small', 'Thumbnail Large', 'HDR']:
+
+                    filename = f"{screenshot.get('title').replace(':', '')} - {kind}.png"
+
+                    if not os.path.exists(filename):
+                        continue
+
+                    upload_screenshot(storage_api, filename, profile)
+
+                    try:
+                        os.remove(filename)
+                    except PermissionError:
+                        print(f"Failed to delete: {filename}")
+
+            i += 1
+
+            if -1 < count <= i:
+                break
+
+        if mode in ['all', 'videos', 'captures']:
+            youtube_api = initialize_youtube_client(profile)
+
+            if not youtube_api:
+                return "YouTube authentication failure", 401
+
+            existing = get_last_playlist_items(youtube_api, profile)
+
+            if SETTINGS.get('debug') and not existing:
+                print("Quota exceeded, stopping operation.")
+                return "Quota exceeded, stopping operation.", 200
+
+            captures = get_xbox_capture_list(profile)
+
+        else:
+            youtube_api = None
+            existing = []
+            captures = []
 
         for capture in captures:
 
@@ -335,6 +505,8 @@ def process(profile: str = '', count: int = -1):
 
                 if not success:
                     results['fail'].append((profile, capture.get('title'), f"error while uploading: {message}"))
+                    if message == 'quota':
+                        break
 
                 else:
                     results['success'].append((profile, capture.get('title')))
@@ -371,16 +543,16 @@ def index():
 
 if __name__ == '__main__':
 
-    if len(sys.argv) > 1:
-        if sys.argv[1] == 'process':
-            if len(sys.argv) > 2:
-                if len(sys.argv) > 3:
-                    process(sys.argv[2], int(sys.argv[3]))
-                else:
-                    process(sys.argv[2])
+    action = sys.argv[1] if len(sys.argv) > 1 else None
+    arg_profile = sys.argv[2] if len(sys.argv) > 2 else 'all'
+    arg_mode = sys.argv[3] if len(sys.argv) > 3 else 'all'
+    arg_count = int(sys.argv[4]) if len(sys.argv) > 4 else -1
+
+    match action:
+        case 'process':
+            process(arg_profile, arg_mode, arg_count)
+        case _:
+            if action is not None:
+                print(f"Unknown action: {action}")
             else:
-                process()
-        else:
-            print(f"Unknown argument: {sys.argv[1]}")
-    else:
-        api.run()
+                api.run()
