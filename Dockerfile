@@ -1,8 +1,7 @@
-FROM python:3.11-alpine3.16
+FROM python:3.11-slim
 
 WORKDIR .
-COPY requirements.txt .
-COPY main.py .
+COPY . .
 
 COPY requirements.txt requirements.txt
 RUN pip install -r requirements.txt
