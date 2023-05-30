@@ -66,8 +66,21 @@ def save_credentials(profile: str, credentials: dict):
 @api.route('/authorize/<string:profile>')
 def authorize(profile: str):
 
-    flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file(
-        'youtube.json', scopes=["https://www.googleapis.com/auth/youtube"])
+    client_id = SETTINGS.get('profiles').get(profile).get('youtube_client_id')
+    client_secret = SETTINGS.get('profiles').get(profile).get('youtube_client_secret')
+
+    flow = google_auth_oauthlib.flow.Flow.from_client_config(
+        client_config={
+            "installed": {
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "redirect_uris": ["http://localhost", "urn:ietf:wg:oauth:2.0:oob"],
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://accounts.google.com/o/oauth2/token"
+            }
+        },
+        scopes=['https://www.googleapis.com/auth/youtube']
+    )
 
     flow.redirect_uri = f"{flask.url_for('oauth2callback', _external=True, profile=profile)}"
     authorization_url, state = flow.authorization_url(access_type='offline', include_granted_scopes='true')
