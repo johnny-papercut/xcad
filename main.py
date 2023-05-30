@@ -66,6 +66,8 @@ def save_credentials(profile: str, credentials: dict):
 @api.route('/authorize/<string:profile>')
 def authorize(profile: str):
 
+    load_profiles()
+
     client_id = SETTINGS.get('profiles').get(profile).get('youtube_client_id')
     client_secret = SETTINGS.get('profiles').get(profile).get('youtube_client_secret')
 
