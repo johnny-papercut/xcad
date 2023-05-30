@@ -89,6 +89,7 @@ def authorize(profile: str):
     )
 
     flow.redirect_uri = f"{flask.url_for('oauth2callback', _external=True, profile=profile)}"
+    print(flow.redirect_uri)
 
     authorization_url, state = flow.authorization_url(access_type='offline', include_granted_scopes='true')
     flask.session['state'] = state
