@@ -3,22 +3,23 @@ import os
 import random
 import string
 import sys
-import cv2
-import numpy
 
+import cv2
 import flask
 import google_auth_oauthlib.flow
 import googleapiclient.discovery
+import numpy
 import pytz
 import requests
-import pafy
-
+from google.auth.transport.requests import Request
 from google.cloud import bigquery
 from google.cloud import storage
 from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials
 from googleapiclient.errors import ResumableUploadError
 from googleapiclient.http import MediaFileUpload, HttpError
+
+import pafy
 
 SETTINGS = {
     'debug': True,
@@ -132,6 +133,9 @@ def initialize_youtube_client(profile: str):     # -> googleapiclient.discovery.
         token_uri='https://accounts.google.com/o/oauth2/token',
         scopes=['https://www.googleapis.com/auth/youtube']
     )
+
+    credentials.refresh(Request())
+    save_credentials(profile, credentials_to_dict(credentials))
 
     if not credentials.valid:
         print("INVALID CREDENTIALS!")
