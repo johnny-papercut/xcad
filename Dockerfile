@@ -3,7 +3,7 @@ FROM python:3.11-slim
 WORKDIR .
 COPY . .
 
-RUN apt-get update && apt-get install git
+RUN apt-get update && apt-get install git -y
 
 COPY requirements.txt requirements.txt
 RUN pip install -r requirements.txt
