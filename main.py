@@ -76,7 +76,7 @@ def authorize(profile: str):
             "installed": {
                 "client_id": client_id,
                 "client_secret": client_secret,
-                "redirect_uris": ["http://localhost", "urn:ietf:wg:oauth:2.0:oob"],
+                "redirect_uris": ["http://localhost", "https://xcad.zirekyle.com", "urn:ietf:wg:oauth:2.0:oob"],
                 "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                 "token_uri": "https://accounts.google.com/o/oauth2/token"
             }
