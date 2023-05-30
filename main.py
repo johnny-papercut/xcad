@@ -664,7 +664,7 @@ def process(profile: str = '', mode: str = '', count: int = -1):
 
             else:
 
-                dub = detect_dub(f"{capture.get('title').replace(':', '')}.mp4")
+                dub = detect_dub("file", f"{capture.get('title').replace(':', '')}.mp4")
 
                 if mode != 'backfill':
                     success, message = upload_capture_to_youtube(youtube_api, capture, profile, dub)
