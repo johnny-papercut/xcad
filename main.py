@@ -89,7 +89,10 @@ def authorize(profile: str):
     )
 
     flow.redirect_uri = f"{flask.url_for('oauth2callback', _external=True, profile=profile)}"
+    print(flow.redirect_uri)
+
     authorization_url, state = flow.authorization_url(access_type='offline', include_granted_scopes='true')
+    flask.session['state'] = state
 
     return flask.redirect(authorization_url)
 
@@ -101,6 +104,8 @@ def oauth2callback(profile: str):
 
     client_id = SETTINGS.get('profiles').get(profile).get('youtube_client_id')
     client_secret = SETTINGS.get('profiles').get(profile).get('youtube_client_secret')
+
+    state = flask.session.get('state')
 
     flow = google_auth_oauthlib.flow.Flow.from_client_config(
         client_config={
@@ -116,8 +121,7 @@ def oauth2callback(profile: str):
                 "token_uri": "https://accounts.google.com/o/oauth2/token"
             }
         },
-        scopes=["https://www.googleapis.com/auth/youtube"])
-
+        scopes=["https://www.googleapis.com/auth/youtube"], state=state)
     flow.redirect_uri = flask.url_for('oauth2callback', _external=True, profile=profile)
 
     authorization_response = flask.request.url
