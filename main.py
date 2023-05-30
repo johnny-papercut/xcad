@@ -125,7 +125,7 @@ def oauth2callback(profile: str):
     flow.redirect_uri = flask.url_for('oauth2callback', _external=True, profile=profile)
 
     authorization_response = flask.request.url
-    flow.fetch_token(authorization_response=authorization_response)
+    flow.fetch_token(code=authorization_response)
 
     credentials = credentials_to_dict(flow.credentials)
     flask.session['credentials'] = credentials
