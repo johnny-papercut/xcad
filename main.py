@@ -75,14 +75,15 @@ def authorize(profile: str):
         client_config={
             "web": {
                 "client_id": client_id,
+                "project_id": "zirekyle-main",
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
                 "client_secret": client_secret,
                 "redirect_uris": [
                     "http://localhost:5000/oauth2callback/Zirekyle",
                     "https://xcad.zirekyle.com/oauth2callback/Zirekyle",
-                    "https://xcad-akurivnfnq-uc.a.run.app/oauth2callback/Zirekyle"
-                ],
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://accounts.google.com/o/oauth2/token"
+                    "https://xcad-akurivnfnq-uc.a.run.app/oauth2callback/Zirekyle"]
             }
         },
         scopes=['https://www.googleapis.com/auth/youtube']
@@ -125,7 +126,7 @@ def oauth2callback(profile: str):
     flow.redirect_uri = flask.url_for('oauth2callback', _external=True, profile=profile)
 
     authorization_response = flask.request.url
-    flow.fetch_token(code=authorization_response)
+    flow.fetch_token(authorization_response=authorization_response)
 
     credentials = credentials_to_dict(flow.credentials)
     flask.session['credentials'] = credentials
