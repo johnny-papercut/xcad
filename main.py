@@ -73,7 +73,7 @@ def authorize(profile: str):
 
     flow = google_auth_oauthlib.flow.Flow.from_client_config(
         client_config={
-            "installed": {
+            "web": {
                 "client_id": client_id,
                 "client_secret": client_secret,
                 "redirect_uris": [
@@ -109,7 +109,7 @@ def oauth2callback(profile: str):
 
     flow = google_auth_oauthlib.flow.Flow.from_client_config(
         client_config={
-            "installed": {
+            "web": {
                 "client_id": client_id,
                 "client_secret": client_secret,
                 "redirect_uris": [
