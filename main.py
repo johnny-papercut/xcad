@@ -76,7 +76,10 @@ def authorize(profile: str):
             "installed": {
                 "client_id": client_id,
                 "client_secret": client_secret,
-                "redirect_uris": ["http://localhost", "https://xcad.zirekyle.com", "urn:ietf:wg:oauth:2.0:oob"],
+                "redirect_uris": [
+                    "http://localhost:5000/oauth2callback/Zirekyle",
+                    "https://xcad.zirekyle.com/oauth2callback/Zirekyle"
+                ],
                 "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                 "token_uri": "https://accounts.google.com/o/oauth2/token"
             }
@@ -85,6 +88,7 @@ def authorize(profile: str):
     )
 
     flow.redirect_uri = f"{flask.url_for('oauth2callback', _external=True, profile=profile)}"
+
     authorization_url, state = flow.authorization_url(access_type='offline', include_granted_scopes='true')
     flask.session['state'] = state
 
@@ -94,10 +98,27 @@ def authorize(profile: str):
 @api.route('/oauth2callback/<string:profile>')
 def oauth2callback(profile: str):
 
+    load_profiles()
+
+    client_id = SETTINGS.get('profiles').get(profile).get('youtube_client_id')
+    client_secret = SETTINGS.get('profiles').get(profile).get('youtube_client_secret')
+
     state = flask.session['state']
 
-    flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file(
-        'youtube.json', scopes=["https://www.googleapis.com/auth/youtube"], state=state)
+    flow = google_auth_oauthlib.flow.Flow.from_client_config(
+        client_config={
+            "installed": {
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "redirect_uris": [
+                    "http://localhost:5000/oauth2callback/Zirekyle",
+                    "https://xcad.zirekyle.com/oauth2callback/Zirekyle"
+                ],
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://accounts.google.com/o/oauth2/token"
+            }
+        },
+        scopes=["https://www.googleapis.com/auth/youtube"], state=state)
     flow.redirect_uri = flask.url_for('oauth2callback', _external=True, profile=profile)
 
     authorization_response = flask.request.url
