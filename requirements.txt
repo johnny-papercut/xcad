@@ -29,7 +29,9 @@ idna==3.4
 itsdangerous==2.1.2
 Jinja2==3.1.2
 MarkupSafe==2.1.2
+numpy==1.24.3
 oauthlib==3.2.2
+opencv-python==4.5.5.62
 packaging==23.0
 proto-plus==1.22.2
 protobuf==4.22.1
@@ -45,3 +47,4 @@ six==1.16.0
 uritemplate==4.1.1
 urllib3==1.26.15
 Werkzeug==2.2.3
+youtube-dl @ git+https://github.com/ytdl-org/youtube-dl.git@d1c6c5c4d618fa950813c0c71aede34a5ac851e9

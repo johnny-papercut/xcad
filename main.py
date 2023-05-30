@@ -3,12 +3,15 @@ import os
 import random
 import string
 import sys
+import cv2
+import numpy
 
 import flask
 import google_auth_oauthlib.flow
 import googleapiclient.discovery
 import pytz
 import requests
+import pafy
 
 from google.cloud import bigquery
 from google.cloud import storage
@@ -39,6 +42,7 @@ def load_profiles():
         SETTINGS['profiles'][profile.xbox_gamertag] = {
             'xbox_api_key': profile.xbox_api_key,
             'youtube_playlist_id': profile.youtube_playlist_id,
+            'youtube_win_playlist_id': profile.youtube_win_playlist_id,
             'youtube_client_id': profile.youtube_client_id,
             'youtube_client_secret': profile.youtube_client_secret,
             'youtube_token': profile.youtube_token,
@@ -136,23 +140,18 @@ def initialize_youtube_client(profile: str):     # -> googleapiclient.discovery.
     return googleapiclient.discovery.build('youtube', 'v3', credentials=credentials)
 
 
-def get_last_playlist_items(youtube, profile: str) -> list:
-    """ Get the titles of the last 50 YouTube playlist videos """
+def get_playlist_items(youtube, playlist_id: str) -> list:
+    """ Get the titles of all YouTube videos in a playlist """
 
-    if SETTINGS.get('debug'):
-        print(f"[Profile: {profile}] Getting playlist titles from YouTube...")
-
-    settings = SETTINGS.get('profiles').get(profile)
-
-    titles = []
+    items = []
     page_token = None
 
-    while len(titles) < 1 or page_token:
+    while len(items) < 1 or page_token:
 
         try:
             response = youtube.playlistItems().list(
                 part='contentDetails,snippet',
-                playlistId=settings.get('youtube_playlist_id'),
+                playlistId=playlist_id,
                 maxResults=50,
                 pageToken=page_token,
             ).execute()
@@ -169,9 +168,9 @@ def get_last_playlist_items(youtube, profile: str) -> list:
             if item.get('snippet').get('title') == 'Deleted video':
                 continue
 
-            titles.append(item.get('snippet').get('title'))
+            items.append((item.get('snippet').get('title'), item.get('contentDetails').get('videoId')))
 
-    return titles
+    return items
 
 
 def get_screenshot_bucket_list(storage_client, profile: str) -> list:
@@ -353,7 +352,7 @@ def upload_screenshot(storage_client, filename: str, profile: str):
     blob.make_public()
 
 
-def upload_capture_to_youtube(youtube, capture_data, profile) -> tuple:
+def upload_capture_to_youtube(youtube, capture_data: dict, profile: str, dub: bool) -> tuple:
     """ Upload a capture to YouTube and add to the given playlist """
 
     print(f"[Profile: {profile}] Uploading capture: {capture_data.get('title')} ...")
@@ -384,21 +383,29 @@ def upload_capture_to_youtube(youtube, capture_data, profile) -> tuple:
 
     video_id = response.get('id')
 
-    request = youtube.playlistItems().insert(
+    add_to_youtube_playlist(youtube, SETTINGS.get('profiles').get(profile).get('youtube_playlist_id'), video_id)
+
+    if dub:
+        add_to_youtube_playlist(youtube, SETTINGS.get('profiles').get(profile).get('youtube_win_playlist_id'), video_id)
+
+    return True, True
+
+
+def add_to_youtube_playlist(youtube, playlist_id: str, video_id: str):
+    """ Add the video ID to the YouTube playlist ID """
+
+    youtube.playlistItems().insert(
         part="snippet",
         body={
-          "snippet": {
-            "playlistId": SETTINGS.get('profiles').get(profile).get('youtube_playlist_id'),
-            "resourceId": {
-              "kind": "youtube#video",
-              "videoId": video_id
+            "snippet": {
+                "playlistId": playlist_id,
+                "resourceId": {
+                    "kind": "youtube#video",
+                    "videoId": video_id
+                }
             }
-          }
         }
-    )
-
-    request.execute()
-    return True, True
+    ).execute()
 
 
 def credentials_to_dict(credentials):
@@ -410,6 +417,84 @@ def credentials_to_dict(credentials):
         'client_secret': credentials.client_secret,
         'scopes': credentials.scopes
     }
+
+
+def detect_dub(mode: str, video: str) -> bool:
+
+    if mode == 'file':
+        capture = cv2.VideoCapture(video)
+    elif mode == 'url':
+        video = pafy.new(video)
+        best = video.getbest(preftype="mp4")
+        capture = cv2.VideoCapture(best.url)
+    else:
+        return False
+
+    match = cv2.imread('victory.png', 0)
+
+    count = 0
+
+    while True:
+
+        count += 1
+
+        if count % 60:
+            capture.grab()
+            continue
+
+        success, image = capture.read()
+
+        if not success:
+            break
+
+        grayscale = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        if len(list(zip(*numpy.where(cv2.matchTemplate(grayscale, match, cv2.TM_CCOEFF_NORMED) >= 0.8)[::-1]))):
+            return True
+
+    return False
+
+
+def check_playlist_for_dubs(profile: str):
+
+    load_profiles()
+    youtube = initialize_youtube_client(profile)
+
+    playlist_id = SETTINGS.get('profiles').get(profile).get('youtube_playlist_id')
+    win_playlist_id = SETTINGS.get('profiles').get(profile).get('youtube_win_playlist_id')
+
+    existing_wins = [item[1] for item in get_playlist_items(youtube, win_playlist_id)]
+
+    page_token = None
+
+    while True:
+
+        try:
+            response = youtube.playlistItems().list(
+                part='contentDetails,snippet',
+                playlistId=playlist_id,
+                maxResults=50,
+                pageToken=page_token,
+            ).execute()
+        except HttpError:
+            return []
+
+        page_token = response.get('nextPageToken')
+
+        for item in response.get('items'):
+
+            if item.get('contentDetails').get('videoId') in existing_wins:
+                continue
+
+            url = f"https://youtube.com/watch?v={item.get('contentDetails').get('videoId')}"
+            dub = detect_dub('url', url)
+
+            if dub:
+                add_to_youtube_playlist(youtube, win_playlist_id, item.get('contentDetails').get('videoId'))
+                print(f"Adding dub: {url}")
+
+        if not page_token:
+            return
 
 
 @api.route("/process/<string:profile>/<string:mode>/<int:count>")
@@ -494,13 +579,17 @@ def process(profile: str = '', mode: str = '', count: int = -1):
             if -1 < count <= i:
                 break
 
-        if mode in ['all', 'videos', 'captures']:
+        playlist_id = SETTINGS.get('profiles').get(profile).get('youtube_playlist_id')
+        win_playlist_id = SETTINGS.get('profiles').get(profile).get('youtube_win_playlist_id')
+
+        if mode in ['all', 'videos', 'captures', 'backfill']:
             youtube_api = initialize_youtube_client(profile)
 
             if not youtube_api:
                 return "YouTube authentication failure", 401
 
-            existing = get_last_playlist_items(youtube_api, profile)
+            existing = get_playlist_items(youtube_api, playlist_id)
+            existing_wins = get_playlist_items(youtube_api, win_playlist_id)
 
             if SETTINGS.get('debug') and not existing:
                 print("Quota exceeded, stopping operation.")
@@ -511,23 +600,38 @@ def process(profile: str = '', mode: str = '', count: int = -1):
         else:
             youtube_api = None
             existing = []
+            existing_wins = []
             captures = []
 
         for capture in captures:
 
-            if capture.get('title') in existing:
+            if capture.get('title') in [item[0] for item in existing] and mode != 'backfill':
                 continue
 
-            success, message = download_capture(capture, profile)
+            if mode == 'backfill' and 'Modern Warfare' not in capture.get('title'):
+                continue
+
+            if not os.path.exists(f"{capture.get('title').replace(':', '')}.mp4"):
+                success, message = download_capture(capture, profile)
+            else:
+                success, message = True, 'True'
 
             if not success:
                 results['fail'].append((profile, capture.get('title'), f"error while downloading: {message}"))
-                if message == 'quota':
-                    print("Quota exceeded, stopping operation.")
-                    return results, 403 if results.get('fail') else 200
 
             else:
-                success, message = upload_capture_to_youtube(youtube_api, capture, profile)
+
+                dub = detect_dub(f"{capture.get('title').replace(':', '')}.mp4")
+
+                if mode != 'backfill':
+                    success, message = upload_capture_to_youtube(youtube_api, capture, profile, dub)
+                elif dub:
+                    for item in existing:
+                        if item[0] == capture.get('title'):
+                            if item[1] not in [i[0] for i in existing_wins]:
+                                print(f"Adding dub to list: {capture.get('title')}")
+                                add_to_youtube_playlist(youtube_api, win_playlist_id, item[1])
+                    success, message = True, 'True'
 
                 if not success:
                     results['fail'].append((profile, capture.get('title'), f"error while uploading: {message}"))
@@ -598,6 +702,8 @@ if __name__ == '__main__':
     match action:
         case 'process':
             process(arg_profile, arg_mode, arg_count)
+        case 'backfill':
+            check_playlist_for_dubs(arg_profile)
         case _:
             if action is not None:
                 print(f"Unknown action: {action}")
