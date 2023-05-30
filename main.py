@@ -114,7 +114,7 @@ def oauth2callback(profile: str):
                 "client_secret": client_secret,
                 "redirect_uris": [
                     "http://localhost:5000/oauth2callback/Zirekyle",
-                    "https://xcad.zirekyle.com/oauth2callback/Zirekyle"
+                    "https://xcad.zirekyle.com/oauth2callback/Zirekyle",
                     "https://xcad-akurivnfnq-uc.a.run.app/oauth2callback/Zirekyle"
                 ],
                 "auth_uri": "https://accounts.google.com/o/oauth2/auth",
